@@ -320,7 +320,9 @@ def _mounts_to_mark(mark: str):
     """Yield one mountpoint per real filesystem under `mark`.
 
     FAN_MARK_FILESYSTEM only covers the fs containing the marked path, so
-    /home, /var, /tmp on separate mounts each need their own mark.
+    /home, /var, /tmp on separate mounts each need their own mark. FUSE
+    mounts (e.g. xdg-document-portal, gvfs) are skipped because fanotify
+    can't mark them: even root gets EACCES when the mount is user-owned.
     """
     norm = mark.rstrip("/") or "/"
     seen_dev = set()
@@ -338,7 +340,7 @@ def _mounts_to_mark(mark: str):
                 dev = left[2]
                 mp = left[4]
                 fstype = right[0]
-                if fstype in PSEUDO_FS:
+                if fstype in PSEUDO_FS or fstype.startswith("fuse"):
                     continue
                 if norm != "/" and not (mp == norm
                                         or mp.startswith(norm + "/")):
