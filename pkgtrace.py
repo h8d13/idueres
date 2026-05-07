@@ -128,8 +128,7 @@ class AuditExecCache:
 
     def __init__(self):
         self.sock = None
-        self.cache = {}     # pid -> {"exe", "ppid", "comm", "argv"}
-        self._id_to_pid = {}  # audit serial -> pid (for SYSCALL/PROCTITLE correlation)
+        self.cache = {}     # pid -> {"exe", "ppid", "comm"}
         self.lock = threading.Lock()
         self.thread = None
         self.stop_event = threading.Event()
@@ -203,43 +202,28 @@ class AuditExecCache:
     _RE_PID        = re.compile(rb"\bpid=(\d+)")
     _RE_PPID       = re.compile(rb"\bppid=(\d+)")
     _RE_COMM       = re.compile(rb'\bcomm="([^"]+)')
-    _RE_AUDIT_ID   = re.compile(rb"audit\(\d+\.\d+:(\d+)\)")
     # Audit text records sometimes truncate before the closing quote, so we
     # match through `"` or end-of-body, whichever comes first.
     _RE_EXE_QUOTED = re.compile(rb'\bexe="([^"]+)')
     _RE_EXE_HEX    = re.compile(rb"\bexe=([0-9a-fA-F]+)(?=\s|$)")
-    _RE_PT_QUOTED  = re.compile(rb'\bproctitle="([^"]+)')
-    _RE_PT_HEX     = re.compile(rb"\bproctitle=([0-9a-fA-F]+)")
 
-    @staticmethod
-    def _decode_quoted_or_hex(quoted, hex_match, nul_to_space=False) -> str:
-        if quoted:
-            return quoted.group(1).decode("utf-8", errors="replace")
-        if hex_match:
+    @classmethod
+    def _extract_exe(cls, body: bytes) -> str:
+        m = cls._RE_EXE_QUOTED.search(body)
+        if m:
+            return m.group(1).decode("utf-8", errors="replace")
+        m = cls._RE_EXE_HEX.search(body)
+        if m:
             try:
-                raw = bytes.fromhex(hex_match.group(1).decode("ascii"))
-                if nul_to_space:
-                    raw = raw.replace(b"\x00", b" ").rstrip()
-                return raw.decode("utf-8", errors="replace")
+                return bytes.fromhex(m.group(1).decode("ascii")).decode(
+                    "utf-8", errors="replace"
+                )
             except (ValueError, UnicodeDecodeError):
                 pass
         return ""
 
-    @classmethod
-    def _extract_exe(cls, body: bytes) -> str:
-        return cls._decode_quoted_or_hex(
-            cls._RE_EXE_QUOTED.search(body), cls._RE_EXE_HEX.search(body),
-        )
-
-    @classmethod
-    def _extract_proctitle(cls, body: bytes) -> str:
-        return cls._decode_quoted_or_hex(
-            cls._RE_PT_QUOTED.search(body), cls._RE_PT_HEX.search(body),
-            nul_to_space=True,
-        )
-
     def _listen(self):
-        AUDIT_SYSCALL, AUDIT_PROCTITLE = 1300, 1327
+        AUDIT_SYSCALL = 1300
         self.sock.settimeout(0.5)
         while not self.stop_event.is_set():
             try:
@@ -255,8 +239,8 @@ class AuditExecCache:
                 )
                 if nlmsg_len < 16 or offset + nlmsg_len > len(data):
                     break
-                body = data[offset + 16 : offset + nlmsg_len]
                 if nlmsg_type == AUDIT_SYSCALL:
+                    body = data[offset + 16 : offset + nlmsg_len]
                     sc = self._RE_SYSCALL.search(body)
                     if sc and sc.group(1) in (b"59", b"322"):
                         m_pid = self._RE_PID.search(body)
@@ -265,36 +249,13 @@ class AuditExecCache:
                             pid = int(m_pid.group(1))
                             m_ppid = self._RE_PPID.search(body)
                             m_comm = self._RE_COMM.search(body)
-                            m_id = self._RE_AUDIT_ID.search(body)
                             with self.lock:
                                 self.cache[pid] = {
                                     "exe": exe,
                                     "ppid": int(m_ppid.group(1)) if m_ppid else 0,
                                     "comm": (m_comm.group(1).decode(
                                         "utf-8", errors="replace") if m_comm else ""),
-                                    "argv": "",
-                                    "audit_id": m_id.group(1) if m_id else None,
                                 }
-                                if m_id:
-                                    self._id_to_pid[m_id.group(1)] = pid
-                                    if len(self._id_to_pid) > 1024:
-                                        # crude bounded cleanup
-                                        for k in list(self._id_to_pid)[:512]:
-                                            del self._id_to_pid[k]
-                elif nlmsg_type == AUDIT_PROCTITLE:
-                    title = self._extract_proctitle(body)
-                    m_id = self._RE_AUDIT_ID.search(body)
-                    if title and m_id:
-                        aid = m_id.group(1)
-                        with self.lock:
-                            pid = self._id_to_pid.get(aid)
-                            # Only apply if this PROCTITLE matches the latest
-                            # SYSCALL we saw for this pid — otherwise a late
-                            # PROCTITLE for an older exec can clobber a newer
-                            # exec's (empty) argv slot.
-                            if (pid and pid in self.cache
-                                    and self.cache[pid].get("audit_id") == aid):
-                                self.cache[pid]["argv"] = title
                 offset += (nlmsg_len + 3) & ~3
 
     def lookup(self, pid: int):
@@ -311,7 +272,7 @@ class AuditExecCache:
             rec = self.lookup(cur)
             if rec:
                 comm = rec.get("comm") or os.path.basename(rec.get("exe", ""))
-                chain.append((cur, comm, rec.get("argv", "")))
+                chain.append((cur, comm))
                 cur = rec.get("ppid", 0)
                 continue
             try:
@@ -323,7 +284,7 @@ class AuditExecCache:
                         if line.startswith("PPid:"):
                             ppid = int(line.split()[1])
                             break
-                chain.append((cur, comm, ""))
+                chain.append((cur, comm))
                 cur = ppid
             except (OSError, ValueError):
                 break
@@ -411,14 +372,10 @@ def main():
         comm = ((rec.get("comm") if rec else "")
                 or comm_for_pid(pid) or os.path.basename(exe))
         chain = audit_cache.lookup_chain(pid) if audit_cache else []
-        # writer's pid is already in column 3, so the chain head shows argv
-        # (which begins with the binary name) or comm if argv is missing.
-        if chain:
-            head = chain[0][2] or chain[0][1]
-            tail = " ← ".join(f"{c[1]}[{c[0]}]" for c in chain[1:])
-            ancestry = f"{head} ← {tail}" if tail else head
-        else:
-            ancestry = "-"
+        # writer's pid+comm already in cols 3+4; ancestry shows just the parents.
+        parents = chain[1:]
+        ancestry = (" ← ".join(f"{c[1]}[{c[0]}]" for c in parents)
+                    if parents else "-")
         row = f"{time.time():.3f}\t{pkg}\t{pid}\t{comm}\t{path}\t{ancestry}"
         print(row, flush=True)
         if history:

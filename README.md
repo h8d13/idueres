@@ -1,6 +1,6 @@
 # IDUERES
 
-> Helps to find application artifact locations
+> Helps to find application artifact locations, parse and dry-run deletes
 
 ## Setup
 
