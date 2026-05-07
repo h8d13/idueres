@@ -13,7 +13,6 @@ import argparse
 import json
 import os
 import sys
-import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -67,8 +66,7 @@ def main():
         try:
             src = open(args.input)
         except FileNotFoundError:
-            sys.exit(f"no input at {args.input} "
-                     "(already processed? look for *.processed files)")
+            sys.exit(f"no input at {args.input}")
     new_writes = 0
     try:
         for line in src:
@@ -108,15 +106,14 @@ def main():
         json.dump(out, f, indent=2, sort_keys=True)
     tmp.replace(out_path)
 
-    # Rotate consumed input so re-running storeparser doesn't double-count
-    # already-merged writes. Skip for stdin and for empty runs.
+    # Truncate consumed input so re-running storeparser doesn't double-count
+    # already-merged writes. Path stays so the next `pkgtrace --history` just
+    # appends fresh rows. Skip for stdin and for empty runs.
     if args.input != "-" and new_writes > 0:
-        rotated = f"{args.input}.{int(time.time())}.processed"
         try:
-            os.rename(args.input, rotated)
-            print(f"# rotated input ==> {rotated}", file=sys.stderr)
+            os.truncate(args.input, 0)
         except OSError as e:
-            print(f"# warn: failed to rotate input: {e}", file=sys.stderr)
+            print(f"# warn: failed to truncate input: {e}", file=sys.stderr)
 
     total_roots = sum(len(r) for r in out.values())
     print(

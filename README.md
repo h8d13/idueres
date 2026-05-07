@@ -27,7 +27,7 @@ Use any app like you normally would. This records all writes.
 2. `sudo storeparser.py --input /tmp/pkgtrace.tsv` 
 
 This creates/appends `/var/lib/pkgtrace/db.json` by application/write locations.
-On success the input tsv is rotated to `<input>.<ts>.processed` so re-runs don't double-count. The next `pkgtrace --history` invocation recreates the tsv fresh.
+On success the input tsv is truncated so re-runs don't double-count; the next `pkgtrace --history` just appends fresh rows.
 
 3. `sudo sweep.py -n chromium`
 
