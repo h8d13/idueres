@@ -70,9 +70,21 @@ def main():
         if not roots:
             print(f"# {pkg}: no roots in db", file=sys.stderr)
             continue
-        print(f"# {pkg}")
+        print(f"# {pkg}", file=sys.stderr)
         for root, count in sorted(roots.items(), key=lambda kv: -kv[1]):
             real = Path(expand(root, home))
+            # is_symlink first: a broken symlink fails exists(), and a
+            # symlink-to-dir would crash rmtree at the top level.
+            if real.is_symlink():
+                if args.dry_run:
+                    print(f"  would rm  {real} (symlink)")
+                else:
+                    try:
+                        real.unlink()
+                        print(f"  removed   {real} (symlink)")
+                    except OSError as e:
+                        print(f"  failed    {real}: {e}", file=sys.stderr)
+                continue
             if not real.exists():
                 print(f"  gone      {real}")
                 continue
@@ -92,7 +104,7 @@ def main():
                     print(f"  failed    {real}: {e}", file=sys.stderr)
 
     if not args.dry_run and total_freed:
-        print(f"# freed {fmt_bytes(total_freed)}")
+        print(f"# freed {fmt_bytes(total_freed)}", file=sys.stderr)
 
 
 if __name__ == "__main__":

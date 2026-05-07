@@ -16,7 +16,6 @@ import time
 from functools import lru_cache
 from pathlib import Path
 import re
-import audit
 
 libaudit = ctypes.CDLL(
     ctypes.util.find_library("audit") or "libaudit.so.1",
@@ -87,19 +86,23 @@ def fanotify_mark(fd, flags, mask, dirfd, path):
 # pacman / /proc helpers
 
 @lru_cache(maxsize=8192)
+def _package_for_exe_cached(exe: str) -> str:
+    r = subprocess.run(
+        ["pacman", "-Qoq", exe],
+        capture_output=True, text=True, timeout=2,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip()
+    return f"unowned({Path(exe).name or exe})"
+
+
 def package_for_exe(exe: str) -> str:
     if not exe:
         return "?"
     try:
-        r = subprocess.run(
-            ["pacman", "-Qoq", exe],
-            capture_output=True, text=True, timeout=2,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
+        return _package_for_exe_cached(exe)
     except Exception:
         return "?"
-    return f"unowned({Path(exe).name or exe})"
 
 
 def exe_for_pid(pid: int) -> str:
@@ -263,6 +266,18 @@ class AuditExecCache:
             rec = self.cache.get(pid)
             return dict(rec) if rec else None
 
+    def prune(self):
+        """Drop entries whose pid no longer exists in /proc.
+
+        Long-running sessions otherwise grow unbounded and risk pid recycle
+        misattributing writes to a dead process's pkg.
+        """
+        with self.lock:
+            dead = [pid for pid in self.cache
+                    if not os.path.exists(f"/proc/{pid}")]
+            for pid in dead:
+                del self.cache[pid]
+
     def lookup_chain(self, pid: int, max_depth: int = 12):
         chain = []
         seen = set()
@@ -289,6 +304,52 @@ class AuditExecCache:
             except (OSError, ValueError):
                 break
         return chain
+
+
+# mountinfo
+
+PSEUDO_FS = frozenset({
+    "proc", "sysfs", "cgroup", "cgroup2", "devpts", "mqueue",
+    "debugfs", "tracefs", "hugetlbfs", "securityfs", "pstore",
+    "autofs", "fusectl", "configfs", "ramfs", "binfmt_misc",
+    "bpf", "rpc_pipefs", "nsfs", "selinuxfs", "efivarfs",
+})
+
+
+def _mounts_to_mark(mark: str):
+    """Yield one mountpoint per real filesystem under `mark`.
+
+    FAN_MARK_FILESYSTEM only covers the fs containing the marked path, so
+    /home, /var, /tmp on separate mounts each need their own mark.
+    """
+    norm = mark.rstrip("/") or "/"
+    seen_dev = set()
+    paths = []
+    try:
+        with open("/proc/self/mountinfo") as f:
+            for line in f:
+                parts = line.split(" - ", 1)
+                if len(parts) != 2:
+                    continue
+                left = parts[0].split()
+                right = parts[1].split()
+                if len(left) < 5 or not right:
+                    continue
+                dev = left[2]
+                mp = left[4]
+                fstype = right[0]
+                if fstype in PSEUDO_FS:
+                    continue
+                if norm != "/" and not (mp == norm
+                                        or mp.startswith(norm + "/")):
+                    continue
+                if dev in seen_dev:
+                    continue
+                seen_dev.add(dev)
+                paths.append(mp)
+    except OSError:
+        return [mark]
+    return paths or [mark]
 
 
 # main
@@ -339,16 +400,25 @@ def main():
         FAN_CLASS_NOTIF | FAN_CLOEXEC,
         O_RDONLY | O_LARGEFILE | O_CLOEXEC,
     )
-    fanotify_mark(
-        fan_fd,
-        FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
-        FAN_CLOSE_WRITE,
-        AT_FDCWD,
-        args.mark,
-    )
+    marked = []
+    for mp in _mounts_to_mark(args.mark):
+        try:
+            fanotify_mark(
+                fan_fd,
+                FAN_MARK_ADD | FAN_MARK_FILESYSTEM,
+                FAN_CLOSE_WRITE,
+                AT_FDCWD,
+                mp,
+            )
+            marked.append(mp)
+        except OSError as e:
+            print(f"# skip mark {mp}: {e}", file=sys.stderr)
+    if not marked:
+        sys.exit(f"no filesystems marked under {args.mark}")
 
-    print(f"# watching fs of {args.mark}; keep prefixes={prefixes}",
+    print(f"# watching {len(marked)} fs under {args.mark}: {marked}",
           file=sys.stderr)
+    print(f"# keep prefixes={prefixes}", file=sys.stderr)
     print(f"# excludes={excludes}", file=sys.stderr)
     print("# columns: ts\tpkg\tpid\tcomm\tpath\tancestry", file=sys.stderr)
 
@@ -382,6 +452,8 @@ def main():
             history.write(row + "\n")
             history.flush()
 
+    event_count = 0
+    PRUNE_INTERVAL = 1000
     try:
         while True:
             buf = os.read(fan_fd, 4096)
@@ -400,6 +472,9 @@ def main():
                 if path.endswith(" (deleted)"):
                     path = path[:-10]
                 emit(path, pid)
+                event_count += 1
+                if audit_cache and event_count % PRUNE_INTERVAL == 0:
+                    audit_cache.prune()
     except KeyboardInterrupt:
         pass
     finally:
