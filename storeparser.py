@@ -2,12 +2,11 @@
 """storeparser aggregate pkgtrace TSV into a per-package storage-root db.
 
 Reads pkgtrace output (TSV columns: ts pkg pid comm path ancestry) and
-collapses paths into XDG-style storage roots, counting writes per root.
-Output: JSON like
+collapses paths into per-app storage roots under known home subdirs,
+counting writes per root. Output: JSON like
     {"firefox": {"~/.cache/mozilla/firefox": 800, "~/.config/mozilla/firefox": 42}}
 
-Only XDG-rooted paths (~/.config/X, ~/.cache/X, ~/.local/share/X,
-~/.local/state/X) are aggregated.
+Tracked tiers are defined in HOME_TLDS.
 """
 import argparse
 import json
@@ -16,16 +15,17 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-XDG_TLDS = (".config", ".cache", ".local/share", ".local/state")
+HOME_TLDS = (".config", ".cache", ".local/share", ".local/state",
+             ".local/bin", "bin")
 DEFAULT_INPUT = "/tmp/pkgtrace.tsv"
 DEFAULT_DB    = "/var/lib/pkgtrace/db.json"
 
 def storage_root(path: str, home: str) -> str | None:
-    """Return ~-relative root for an XDG path, or None to skip."""
+    """Return ~-relative root for a known home tier, or None to skip."""
     if not path.startswith(home + "/"):
         return None
     rel = path[len(home) + 1:]
-    for tld in XDG_TLDS:
+    for tld in HOME_TLDS:
         if rel.startswith(tld + "/"):
             tail = rel[len(tld) + 1:]
             first = tail.split("/", 1)[0]

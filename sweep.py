@@ -92,6 +92,20 @@ def main():
             if sharers:
                 print(f"  conflict  {real} (also: {', '.join(sharers)})")
                 continue
+            # File roots (e.g. ~/bin/<binary>) need unlink, not rmtree.
+            if real.is_file():
+                size = real.stat().st_size
+                if args.dry_run:
+                    print(f"  would rm  {real} "
+                          f"({fmt_bytes(size)}, {count} writes, file)")
+                else:
+                    try:
+                        real.unlink()
+                        print(f"  removed   {real} ({fmt_bytes(size)})")
+                        total_freed += size
+                    except OSError as e:
+                        print(f"  failed    {real}: {e}", file=sys.stderr)
+                continue
             size = dir_size(real)
             if args.dry_run:
                 print(f"  would rm  {real} ({fmt_bytes(size)}, {count} writes)")

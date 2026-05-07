@@ -4,6 +4,8 @@
 
 > This is made for apps that do not have self clean-up in `.install` files (`pre_remove` / `post_remove`)
 
+Tracks per-app writes under known home tiers (XDG dirs plus `~/bin` and `~/.local/bin`). Exact list: `HOME_TLDS` in `storeparser.py`.
+
 ## Setup
 
 Requires: `python-audit` `audit`
