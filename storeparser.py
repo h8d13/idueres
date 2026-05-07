@@ -44,7 +44,7 @@ def main():
                     help="home dir for XDG normalization "
                          "(default: $SUDO_USER's or current $HOME)")
     ap.add_argument("--min-writes", type=int, default=1,
-                    help="drop roots seen fewer than N times (default 1)")
+                    help="drop roots with fewer than N writes after merge (default 1)")
     args = ap.parse_args()
 
     home = args.home or (
@@ -52,8 +52,16 @@ def main():
         else os.path.expanduser("~")
     )
 
-    src = sys.stdin if args.input == "-" else open(args.input)
+    out_path = Path(args.output)
     db: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    if out_path.exists():
+        with open(out_path) as f:
+            for pkg, roots in json.load(f).items():
+                for root, n in roots.items():
+                    db[pkg][root] = n
+
+    src = sys.stdin if args.input == "-" else open(args.input)
+    new_writes = 0
     try:
         for line in src:
             line = line.rstrip("\n")
@@ -69,6 +77,7 @@ def main():
             if root is None:
                 continue
             db[pkg][root] += 1
+            new_writes += 1
     finally:
         if src is not sys.stdin:
             src.close()
@@ -79,14 +88,18 @@ def main():
     }
     out = {pkg: roots for pkg, roots in out.items() if roots}
 
-    out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    with open(tmp, "w") as f:
         json.dump(out, f, indent=2, sort_keys=True)
+    tmp.replace(out_path)
 
     total_roots = sum(len(r) for r in out.values())
-    print(f"# wrote {out_path}: {len(out)} pkgs, {total_roots} roots",
-          file=sys.stderr)
+    print(
+        f"# {out_path}: {len(out)} pkgs, {total_roots} roots "
+        f"(+{new_writes} writes this run)",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":
