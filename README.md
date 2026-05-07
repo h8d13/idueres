@@ -33,9 +33,9 @@ This creates/appends `/var/lib/pkgtrace/db.json` by application/write locations.
 This returns:
 ```
 # chromium
-  would rm  /home/hadean/.config/chromium (10.0 MiB, 78 writes)
-  would rm  /home/hadean/.cache/chromium (2.6 MiB, 37 writes)
-  would rm  /home/hadean/.cache/nvidia (3.2 MiB, 2 writes)
+  would rm  /home/user/.config/chromium (10.0 MiB, 78 writes)
+  would rm  /home/user/.cache/chromium (2.6 MiB, 37 writes)
+  would rm  /home/user/.cache/nvidia (3.2 MiB, 2 writes)
 ```
 
 Finally: `sudo ./sweep.py chromium` would actually delete these things. Finally you can remove the app normally with you prefered `pacman` flags.
