@@ -1,6 +1,7 @@
 # IDUERES
 
-> Helps to find application artifact locations, parse and dry-run deletes
+> Helps to find application artifact locations, parse and dry-run deletes.
+
 > This is made for apps that do not have self clean-up in `.install` files (`pre_remove` / `post_remove`)
 
 ## Setup
